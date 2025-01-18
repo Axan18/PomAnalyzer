@@ -1,51 +1,67 @@
+import re
 import tkinter as tk
 from tkinter.filedialog import askopenfilename
 import xml.etree.ElementTree as ET
+import subprocess
+from Dependency import Dependency
 
 def main():
-    dependencies = get_pom_dependencies()
-    print(dependencies)
+    result = subprocess.run(
+        ["mvn.cmd", "dependency:tree", "-DoutputFile=dependency-tree.txt"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if result.returncode != 0:
+        print("Error while running maven command")
+        print(result.stderr)
+        return
+    explicit_dependencies = get_pom_dependencies()
+    all_dependencies = flatten_dependencies(explicit_dependencies)
+    for dependency in all_dependencies:
+        print(dependency)
+
 
 def get_pom_dependencies():
-    # TODO: encable this code to select file from dialog
-    #tk.Tk().withdraw()
-    #pom_file = askopenfilename(title="Select pom.xml file", filetypes=[("XML files", "*.xml")])
-    #tree = ET.parse(pom_file)
-    tree = ET.parse("example_pom.xml")
-    root = tree.getroot()
-    global namespace
-    namespace = {'pom': root.tag.split("}")[0].strip("{")}
-    dependencies = root.find("pom:dependencies", namespace).findall("pom:dependency", namespace)
-    result = {}
-    for dependency in dependencies:
-        name, attributes = dependency_parser(dependency)
-        result[name] = attributes
+    tree = open("dependency-tree.txt", "r")
+    dependencies = []
+    stack = []
+    for line in tree.read().split("\n"):
+        if line == "":
+            continue
+        indentation_level = line.count("|")
+        if indentation_level == 0:
+            stack = []
+        dependency = dependency_data_extraction(line)
+        if dependency:
+            while len(stack) > indentation_level:
+                stack.pop()
+            if stack:
+                stack[-1].add_dependency(dependency)
+            else:
+                dependencies.append(dependency)
 
-    parent = root.find("pom:parent", namespace)
-    if parent is not None:
-        parent = dependency_parser(parent)
-        result = dependency_version_from_parent(result, parent[1])
-    return result
+            stack.append(dependency)
 
-def dependency_parser(dependency) -> tuple:
-    name = dependency.find("pom:artifactId", namespace).text
-    atributes = {
-        "groupId":
-            dependency.find("pom:groupId", namespace).text if dependency.find("pom:groupId",
-                                                                              namespace) is not None else "",
-        "version":
-            dependency.find("pom:version", namespace).text if dependency.find("pom:version",
-                                                                              namespace) is not None else "",
-        "scope":
-            dependency.find("pom:scope", namespace).text if dependency.find("pom:scope",
-                                                                            namespace) is not None else "compile"
-    }
-    return name, atributes
-def dependency_version_from_parent(dependencies, parent):
-    for key in dependencies:
-        if dependencies[key]["groupId"] == parent["groupId"] and dependencies[key]["version"] == "":
-            dependencies[key]["version"] = parent["version"]
     return dependencies
+
+def flatten_dependencies(dependencies):
+    flattened = []
+    for dependency in dependencies:
+        flattened.append(dependency)
+        flattened.extend(flatten_dependencies(dependency.dependencies))
+    return flattened
+
+def dependency_data_extraction(line):
+    dependency = line.split("-",1)[1].strip()
+    print(dependency)
+    pattern = r"^([a-z0-9.\-]+):([a-z0-9.\-]+):([a-z0-9.\-]+):([0-9.]+):([a-z]+)"
+    match = re.match(pattern, dependency)
+
+    if match:
+        group_id = match.group(1)
+        artifact_id = match.group(2)
+        version = match.group(4)
+        scope = match.group(5)
+        return Dependency(group_id, artifact_id, version, scope)
+    return None
 
 
 if __name__ == "__main__":
