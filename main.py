@@ -1,10 +1,19 @@
 import re
+import time
 import tkinter as tk
 from tkinter.filedialog import askopenfilename
 import xml.etree.ElementTree as ET
 import subprocess
+import base64
+import requests
+from mpmath.libmp import dps_to_prec
+from sqlalchemy.testing import emits_warning
+
 from Dependency import Dependency
 
+MAX_REQUESTS = 50
+TIME_WINDOW = 30
+request_timestamps = []
 def main():
     result = subprocess.run(
         ["mvn.cmd", "dependency:tree", "-DoutputFile=dependency-tree.txt"],
@@ -15,9 +24,59 @@ def main():
         return
     explicit_dependencies = get_pom_dependencies()
     all_dependencies = flatten_dependencies(explicit_dependencies)
-    for dependency in all_dependencies:
-        print(dependency)
+    results = check_vulnerabilities(all_dependencies)
+    print_vulnerabilities(results)
 
+
+def check_vulnerabilities(dependencies):
+    url = "https://api.osv.dev/v1/querybatch"
+    queries = []
+
+    for dependency in dependencies:
+        queries.append({
+            "version": dependency.version,
+            "package": {
+                "name": dependency.group_id+":"+dependency.artifact_id,
+                "ecosystem": "Maven",
+                #"purl": f"pkg:maven/{dependency.group_id}/{dependency.artifact_id}@{dependency.version}"
+            }
+        })
+
+    payload = {"queries": queries}
+    headers = {"Content-Type": "application/json"}
+
+    response = requests.post(url, json=payload, headers=headers)
+
+    if response.status_code == 200:
+        return parse_OSV_response(dependencies, response.json())
+    else:
+        return f"Error: {response.status_code}, {response.text}"
+
+def parse_OSV_response(dependencies, response):
+    results = response["results"]
+    parsed_results = []
+    for dependency, result in zip(dependencies,results):
+        if "vulns" in result:
+            vulns = result["vulns"]
+            parsed_results.append({
+                "dependency": f"{dependency.group_id}:{dependency.artifact_id}:{dependency.version}",
+                "vulnerabilities": [f"https://github.com/advisories/{vuln["id"]}" for vuln in vulns]
+            })
+        else:
+            parsed_results.append({
+                "dependency": f"{dependency.group_id}:{dependency.artifact_id}:{dependency.version}",
+                "vulnerabilities": []
+            })
+    return parsed_results
+
+def print_vulnerabilities(results):
+    is_found = False
+    for result in results:
+        if result["vulnerabilities"]:
+            is_found = True
+            print(f"Dependency: {result['dependency']} has vulnerabilities:{result['vulnerabilities']}")
+    if is_found:
+        print("Find more details using CVE identifiers available at links above")
 
 def get_pom_dependencies():
     tree = open("dependency-tree.txt", "r")
@@ -39,7 +98,7 @@ def get_pom_dependencies():
                 dependencies.append(dependency)
 
             stack.append(dependency)
-
+    tree.close()
     return dependencies
 
 def flatten_dependencies(dependencies):
@@ -51,7 +110,6 @@ def flatten_dependencies(dependencies):
 
 def dependency_data_extraction(line):
     dependency = line.split("-",1)[1].strip()
-    print(dependency)
     pattern = r"^([a-z0-9.\-]+):([a-z0-9.\-]+):([a-z0-9.\-]+):([0-9.]+):([a-z]+)"
     match = re.match(pattern, dependency)
 
